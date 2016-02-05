@@ -26,7 +26,7 @@ func main() {
 	port := flag.String("http_port", "8080", "Port number to listen")
 	configFile := flag.String("config", "redirects.json", "Port number to listen")
 	flag.Parse()
-	log.Printf("starting golinks...")
+	log.Printf("Starting golinks...")
 	r := NewRedirector(*configFile)
 	r.ReadConfig()
 
