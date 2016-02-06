@@ -74,7 +74,7 @@ func (m *Settings) SaveToDisk() {
 func (m *Settings) GetLinks(w http.ResponseWriter, r *http.Request) {
 	var s string
 	for _, v := range m.Redirects {
-		s += v.Shortname + "->" + v.Url + "<BR>"
+		s += fmt.Sprintf("Shortname: %s -> Url: %s  Count %d <BR>", v.Shortname, v.Url, v.Requests)
 	}
 	SendHtml(w, s)
 }
@@ -90,6 +90,7 @@ func (m *Settings) Redirect(w http.ResponseWriter, r *http.Request) {
 			h := w.Header()
 			h.Set("Cache-Control", "private, no-cache")
 			http.Redirect(w, r, url+"/"+args, 302)
+			v.Requests += 1 // Track Requests.
 			break
 		}
 	}
