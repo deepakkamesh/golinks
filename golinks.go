@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -11,147 +12,156 @@ import (
 	"strings"
 )
 
-type Redirect struct {
+type redirect struct {
 	Shortname string
 	Url       string
 	Requests  int32
 }
 
-type Settings struct {
-	Redirects []*Redirect
-	Filename  string
+type settings struct {
+	redirects []*redirect
+	filename  string
 }
 
 func main() {
 	port := flag.String("http_port", "8080", "Port number to listen")
-	configFile := flag.String("config", "redirects.json", "Port number to listen")
+	configFile := flag.String("config", "redirects.json", "Configuration filename")
 	flag.Parse()
-	log.Printf("starting golinks...")
-	r := NewRedirector(*configFile)
-	r.ReadConfig()
+	log.Printf("Starting golinks...")
+	r := newRedirector(*configFile)
+	r.readConfig()
 
-	http.HandleFunc("/add/", r.AddLink)
-	http.HandleFunc("/list/", r.GetLinks)
-	http.HandleFunc("/del/", r.DelLink)
-	http.HandleFunc("/", r.Redirect)
+	http.HandleFunc("/add/", r.addLink)
+	http.HandleFunc("/list/", r.getLinks)
+	http.HandleFunc("/del/", r.delLink)
+	http.HandleFunc("/", r.redirect)
 	if err := http.ListenAndServe(":"+*port, nil); err != nil {
 		log.Fatal("Unable to listen %s", err)
 	}
-	for {
+}
+
+func newRedirector(file string) *settings {
+	return &settings{
+		filename: file,
 	}
 }
 
-func NewRedirector(file string) *Settings {
-	return &Settings{
-		Filename: file,
-	}
-}
-
-func (m *Settings) ReadConfig() {
-	log.Printf("reading configuration...")
-	jsonBlob, err := ioutil.ReadFile(m.Filename)
+// readConfig attempts to marshal a saved config file. If none exists
+// a new one is created.
+func (m *settings) readConfig() {
+	log.Printf("Reading configuration...")
+	jsonBlob, err := ioutil.ReadFile(m.filename)
 	if err != nil {
-		log.Printf("Unable to read configuration %s", err)
+		log.Printf("No config file found. Using new config file.")
 		return
 	}
-	if err := json.Unmarshal(jsonBlob, &m.Redirects); err != nil {
-		log.Printf("error unmarshalling %s", err)
+	if err := json.Unmarshal(jsonBlob, &m.redirects); err != nil {
+		log.Printf("Error unmarshalling %s", err)
 	}
 }
 
-func (m *Settings) SaveToDisk() {
-	b, err := json.Marshal(m.Redirects)
+//saveToDisk unmarshals the struct to a json config file.
+func (m *settings) saveToDisk() error {
+	b, err := json.Marshal(m.redirects)
 	if err != nil {
-		log.Printf("error marshalling %s", err)
+		log.Printf("Error marshalling %s", err)
+		return fmt.Errorf("error marshalling %s", err)
 	}
 
-	if err := ioutil.WriteFile(m.Filename, b, 0644); err != nil {
-		log.Fatalf("unable to open file %s", err)
+	if err := ioutil.WriteFile(m.filename, b, 0644); err != nil {
+		return fmt.Errorf("unable to open file %s", err)
 	}
 	log.Printf("saving to disk.")
+	return nil
 }
 
-func (m *Settings) GetLinks(w http.ResponseWriter, r *http.Request) {
+// getLinks displays all the current redirects.
+func (m *settings) getLinks(w http.ResponseWriter, r *http.Request) {
 	var s string
-	for _, v := range m.Redirects {
+	for _, v := range m.redirects {
 		s += fmt.Sprintf("Shortname: %s -> Url: %s  Count %d <BR>", v.Shortname, v.Url, v.Requests)
 	}
-	SendHtml(w, s)
+	sendHtml(w, s)
 }
 
-func (m *Settings) Redirect(w http.ResponseWriter, r *http.Request) {
-	var url string
+// redirect redirects the shortname to the url.
+func (m *settings) redirect(w http.ResponseWriter, r *http.Request) {
 	req := strings.Split(r.URL.Path[1:], "/")
-	args := strings.Join(req[1:], "/")
 	sh := strings.Trim(req[0], " ")
-	for _, v := range m.Redirects {
+	for _, v := range m.redirects {
 		if v.Shortname == sh {
-			url = v.Url
+			//substitute shortname with real url
+			req[0] = v.Url
 			h := w.Header()
 			h.Set("Cache-Control", "private, no-cache")
-			http.Redirect(w, r, url+"/"+args, 302)
-			v.Requests += 1 // Track Requests.
+			http.Redirect(w, r, strings.Join(req, "/"), 302)
 			break
 		}
 	}
-	SendHtml(w, "Shortname "+sh+" not found!")
-
+	sendHtml(w, "Shortname "+sh+" not found!")
 }
 
-func (m *Settings) DelLink(w http.ResponseWriter, r *http.Request) {
+func (m *settings) delLink(w http.ResponseWriter, r *http.Request) {
 	req := strings.Trim(r.URL.Path[5:], " ")
-	for i, v := range m.Redirects {
+	for i, v := range m.redirects {
 		if v.Shortname == req {
-			m.Redirects = append(m.Redirects[:i], m.Redirects[i+1:]...)
-			m.SaveToDisk()
+			m.redirects = append(m.redirects[:i], m.redirects[i+1:]...)
+			if err := m.saveToDisk(); err != nil {
+				http.Error(w, fmt.Sprintf("Internal error deleting redirect."), http.StatusInternalServerError)
+			}
 			break
 		}
 	}
 	http.Redirect(w, r, "/list", 302)
 }
 
-func (m *Settings) AddLink(w http.ResponseWriter, r *http.Request) {
-	req := strings.Split(r.URL.Path[5:], "|")
+func (m *settings) addLink(w http.ResponseWriter, r *http.Request) {
+
+	// Validate if we recieved a good request
+	var validReq = regexp.MustCompile(`^(http|https|ftp)/[a-z,A-Z,0-9]+/[a-z, ,A-Z,0-9,=,-,_,/,:,\.]+$`)
+	if !validReq.MatchString(r.URL.Path[5:]) {
+		sendHtml(w, html.EscapeString("Request should be of form /add/<protocol eg. http, https, ftp>/<shortname>/<redirect>"))
+		return
+	}
+
+	req := strings.Split(r.URL.Path[5:], "/")
 
 	// Sanitize input.
 	for i, _ := range req {
 		req[i] = strings.Trim(req[i], " ")
 	}
 
-	if len(req) >= 2 {
-		// Ensure proper formatting for redirect url.
-		var validUrl = regexp.MustCompile(`^[a-z, ,A-Z,0-9,-,_,/,:,\.]+$`)
-		if !validUrl.MatchString(req[1]) {
-			SendHtml(w, "Redirect url should be fully qualified URL http://something")
+	shortname := req[1]
+	url := req[0] + "://" + strings.Join(req[2:], "/")
+
+	// Verify if shortname already exists.
+	for _, v := range m.redirects {
+		if v.Shortname == shortname {
+			sendHtml(w, "Shortname already points to "+v.Url)
 			return
 		}
-		// Verify if shortname already exists.
-		for _, v := range m.Redirects {
-			if v.Shortname == req[0] {
-				SendHtml(w, "Shortname already points to "+v.Url)
-				return
-			}
-		}
-		// Add shortname, redirect to list.
-		m.Redirects = append(m.Redirects, &Redirect{
-			Shortname: req[0],
-			Url:       "http://" + req[1],
-			Requests:  0,
-		})
-		SendHtml(w, "Setting up redirect for  "+req[0]+" -> "+req[1])
-		m.SaveToDisk()
+	}
+	// Add shortname, redirect to list.
+	m.redirects = append(m.redirects, &redirect{
+		Shortname: shortname,
+		Url:       url,
+		Requests:  0,
+	})
+
+	if err := m.saveToDisk(); err != nil {
+		http.Error(w, fmt.Sprintf("Internal error saving redirect."), http.StatusInternalServerError)
 		return
 	}
-	fmt.Fprintf(w, "Incorrect add format use add/<shortname>|url")
+	http.Redirect(w, r, "/list", 302)
 }
 
-func SendHtml(w http.ResponseWriter, text string) {
+func sendHtml(w http.ResponseWriter, text string) {
 	fmt.Fprintf(w, `<html>
-				<head>
-				<title>Redirects Setup</title>
-				</head>
-				<body>`)
+                                <head>
+                                <title>Redirects Setup</title>
+                                </head>
+                                <body>`)
 	fmt.Fprintf(w, text)
 	fmt.Fprintf(w, `</body>
-				</html>`)
+                                </html>`)
 }
